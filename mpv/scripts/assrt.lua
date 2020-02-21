@@ -2,7 +2,7 @@
     assrt.lua
 
     Description: Search subtitle on assrt.net
-    Version:     1.0.1
+    Version:     1.0.2
     Author:      AssrtOpensource
     URL:         https:-- github.com/AssrtOSS/mpv-assrt
     License:     Apache License, Version 2.0
@@ -10,13 +10,26 @@
 
 -- luacheck: globals mp read_options
 
-local Ass = require("modules.AssFormat")
-local SelectionMenu = require("modules.SelectionMenu")
-
-require("mp.options")
+local read_options = read_options or require("mp.options").read_options
 local utils = require("mp.utils")
 
-local VERSION = "1.0.1"
+local script_path = debug.getinfo(1, "S").source:sub(2)
+local script_dir = utils.split_path(script_path)
+
+local Ass
+do
+  local ok
+  ok, Ass = pcall(require, "modules.AssFormat")
+  if not ok then
+    -- try inject current script directory into package.path
+    package.path = script_dir .. "?.lua;;" .. package.path
+    Ass = require("modules.AssFormat")
+  end
+end
+
+local SelectionMenu = require("modules.SelectionMenu")
+
+local VERSION = "1.0.4"
 
 local ASSRT = {}
 
@@ -46,6 +59,14 @@ local function getTmpDir()
   return tmpDir
 end
 
+local function fileExists(path)
+  if utils.file_info then -- >= 0.28.0
+      return utils.file_info(path)
+  end
+  local ok, _ = pcall(io.open, path)
+  return ok
+end
+
 local function testDownloadTool()
   local _UA = mp.get_property("mpv-version"):gsub(" ", "/") .. " assrt-" .. VERSION
   local UA = "User-Agent: " .. _UA
@@ -57,8 +78,10 @@ local function testDownloadTool()
       ' Invoke-WebRequest -UserAgent "' .. _UA .. '"  -ContentType "application/json charset=utf-8" -URI '
     }
   }
-  -- cscript is not avaiable under windows because of missing API
-  -- in Lua hook. Need at least mp.script_path or mp.utils.write_file
+  local _winhelper = script_dir .. "win-helper.vbs"
+  if fileExists(_winhelper) then
+    table.insert(cmds, { "cscript", "/nologo", _winhelper, _UA })
+  end
   for i = 1, #cmds do
     local result =
       utils.subprocess(
@@ -301,21 +324,29 @@ function ASSRT:searchSubtitle()
   local fpath = mp.get_property("path", " ")
   local _, fname = utils.split_path(fpath)
   local try_args = {"is_file", "no_muxer"}
-  local ret
+  local sublist
   fname = fname:gsub("[%(%)~]", "")
   for i = 1, 2 do
-    ret = self:api("/sub/search", "q=" .. encodeURIComponent(fname) .. "&" .. try_args[i] .. "=1")
-    if ret and #ret.sub.subs > 0 then
-      break
+    local ret = self:api("/sub/search", "q=" .. encodeURIComponent(fname) .. "&" .. try_args[i] .. "=1")
+    if ret and ret.sub.subs then
+      if not sublist then
+        sublist = {}
+      end
+      for _, s in ipairs(ret.sub.subs) do
+        table.insert(sublist, s)
+      end
+      if #sublist >= 3 then
+        break
+      end
     end
   end
-  if not ret then
+  if not sublist then
     if self.cmd then -- don't overlap cmd error
       self:showOsdError("API请求错误，请检查控制台输出", 2)
     end
     return
   end
-  if #ret.sub.subs == 0 then -- ????
+  if #sublist == 0 then -- ????
     self:showOsdOk("没有符合条件的字幕", 1)
     return
   end
@@ -324,7 +355,6 @@ function ASSRT:searchSubtitle()
   local initialSelectionIdx = 0
   self._list_map = {}
 
-  local sublist = ret.sub.subs
   if not Ass._old_esc then
     Ass._old_esc = Ass.esc
     -- disable escape temporarily
@@ -353,7 +383,7 @@ function ASSRT:searchSubtitle()
           formatLang(sublist[i].lang.desc, self._enableColor) .. (self._enableColor and "  " or "]  ")
     end
     table.insert(menuOptions, title)
-    self._list_map[title] = ret.sub.subs[i].id
+    self._list_map[title] = sublist[i].id
     -- if (selectEntry == sub)
     --    initialSelectionIdx = menuOptions.length - 1
   end
@@ -437,7 +467,7 @@ local function init()
     max_lines = 15,
     font_size = 24
   }
-  read_options(userConfig)
+  read_options(userConfig, "assrt")
 
   -- Create and initialize the media browser instance.
   local assrt
@@ -466,7 +496,7 @@ local function init()
   -- Bind self via input.conf: `a script-binding assrt`.
   mp.add_key_binding(
     "a",
-    "assrt-lua",
+    "assrt",
     function()
       assrt:searchSubtitle()
     end
